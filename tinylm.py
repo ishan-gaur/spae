@@ -41,14 +41,26 @@ class TinyLM(torch.nn.Module):
         # FIXME look at lucidrains or flash-attn's implementations to see how to make this more efficient
         if mask is None:
             n_tok = x.shape[-1]
-            mask = torch.tril(torch.ones([n_tok, n_tok])).bool() 
-            mask = ~mask # masked fill looks at where the mask is true
-        x_embed = self.embed(x)
+            mask = torch.tril(torch.ones([n_tok, n_tok])).bool()[None, ...] # None for batch dimension broadcasting
+            mask = torch.where(mask, 0, -float("Inf"))
+
+        x_embed = self.embed(x) # B x T -> B x T x D
         residual_stream = x_embed
-        x_pos = self.rot_emb.rotate_queries_or_keys(x_embed)
-        Q, K, V = self.W_q(x_pos), self.W_k(x_pos), self.W_v(x_embed)
-        masked_attn = torch.bmm(Q, K.transpose(1, 2)).masked_fill_(mask, -float("Inf"))
-        attn = torch.nn.functional.softmax(masked_attn) / self.sqrt_dim
-        x_attn = torch.bmm(attn, V)
-        residual_stream += x_attn
-        return self.mlp(residual_stream) # add x for residual stream
+
+        # FIXME Missing layernorm on hidden states
+        q = self.W_q(x_embed)
+        k = self.W_k(x_embed)
+        v = self.W_v(x_embed)
+
+        q = self.rot_emb.rotate_queries_or_keys(q)
+        k = self.rot_emb.rotate_queries_or_keys(k)
+        masked_attn = torch.matmul(q, k.transpose(-2, -1)) + mask
+        attn_weights = torch.nn.functional.softmax(masked_attn, dim=-1) / self.sqrt_dim
+        x_attn = torch.matmul(attn_weights, v)
+        # FIXME Missing output projection
+
+        residual_stream = residual_stream + x_attn
+        # FIXME Missing pre mlp layernorm
+        logits = torch.nn.functional.log_softmax(self.mlp(residual_stream)) # add x for residual stream
+
+        return logits

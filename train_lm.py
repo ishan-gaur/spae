@@ -16,33 +16,34 @@ def encode(examples):
     return {"input_ids": tokens}
 
 print("Splitting Dataset")
-dataset_splits = dataset.train_test_split(test_size=0.0001)
+# dataset_splits = dataset.train_test_split(test_size=0.0001)
+dataset_splits = dataset.train_test_split(test_size=0.999999)
 
 print("Data split lengths")
 print(len(dataset_splits["train"]), len(dataset_splits["test"]))
 
 
 print("Tokenizing Dataset")
-# tokenized_train_data = dataset_splits["train"].map(
-#     encode, batched=True, input_columns="text", 
-#     remove_columns=["id", "dump", "url", "file_path", "language", "language_score", "token_count", "score", "int_score"]
-# )
-tokenized_train_data = dataset_splits["test"].map(
+tokenized_train_data = dataset_splits["train"].map(
     encode, batched=True, input_columns="text", 
     remove_columns=["id", "dump", "url", "file_path", "language", "language_score", "token_count", "score", "int_score"],
     num_proc=12
 )
 
-train_data_stream = DocumentStream(tokenized_train_data, sample_len=4096, epochs=1)
-data_iter = iter(train_data_stream)
-print(next(data_iter))
-print(len(next(data_iter)))
+context_len = 32
+train_data_stream = DocumentStream(tokenized_train_data, sample_len=context_len + 1, epochs=1)
+opt = torch.optim.AdamW(lm.parameters(), lr=1e-4)
 
-ct = 0
-toks = 0
-for s in train_data_stream:
-    ct += 1
-    toks += len(s)    
+torch.autograd.set_detect_anomaly(True)
 
-print(f"Total tokens {toks} and total samples {ct}, total in dataset {len(tokenized_train_data)}, mean token count {sum(dataset_splits["test"]["token_count"]) / len(dataset_splits["test"])}")
-# summary(lm, input_data=torch.tensor([lm.tokenize(train_data[0]["text"])[:4096]]).int())
+s = 0
+for sample in train_data_stream:
+    s += 1
+    input_toks = sample[:-1]
+    output_toks = sample[1:]
+    logits = lm(input_toks[None, ...]).squeeze() # lm assumes a batch dimension
+    loss = torch.nn.functional.cross_entropy(logits, output_toks)
+    print(f"Sample: {s}\tLoss: {loss}")
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
